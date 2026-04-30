@@ -1,0 +1,52 @@
+{
+  "name": "offlinechat-electron",
+  "version": "1.0.0",
+  "description": "OfflineChat - Offline AI Chat Application",
+  "main": "main.js",
+  "author": "Your Name",
+  "scripts": {
+    "dev": "cross-env NODE_ENV=development electron .",
+    "build": "electron-builder",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "better-sqlite3": "11.3.0",
+    "node-llama-cpp": "3.18.1",
+    "cross-env": "7.0.3"
+  },
+  "devDependencies": {
+    "electron": "30.5.1",
+    "electron-builder": "25.1.7",
+    "electron-rebuild": "3.2.9"
+  },
+  "build": {
+    "appId": "com.offlinechat.app",
+    "productName": "OfflineChat",
+    "directories": {
+      "output": "../release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "backend/**/*",
+      "ipc/**/*",
+      "dist/**/*",
+      "assets/**/*",
+      "node_modules/**/*"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**",
+      "node_modules/node-llama-cpp/**"
+    ],
+    "icon": "assets/icon.png",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
