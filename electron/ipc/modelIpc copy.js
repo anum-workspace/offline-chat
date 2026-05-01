@@ -14,7 +14,7 @@ function registerModelIpc(state) {
   // Download model with progress
   ipcMain.handle('model:download', async (event, { url, filename }) => {
     console.log('=== model:download ===');
-    console.log('URL:', url?.substring(0, 80) + '...');
+    console.log('URL:', url);
     console.log('Filename:', filename);
 
     const modelsDir = getModelsDir();
@@ -28,28 +28,17 @@ function registerModelIpc(state) {
     // Check if already exists
     if (fs.existsSync(destPath)) {
       const stats = fs.statSync(destPath);
-      console.log('File already exists');
+      console.log('File already exists:', destPath);
       return { success: true, path: destPath, existed: true, size: stats.size };
     }
 
+    // Check if partial download exists
     const tempPath = destPath + '.download';
     let resumeFrom = 0;
     if (fs.existsSync(tempPath)) {
       resumeFrom = fs.statSync(tempPath).size;
       console.log('Resuming from byte:', resumeFrom);
     }
-
-    // Helper to send progress to renderer
-    const sendProgress = (data) => {
-      try {
-        if (event.sender && !event.sender.isDestroyed()) {
-          event.sender.send('model:downloadProgress', data);
-          console.log('Progress sent:', data.progress + '%');
-        }
-      } catch (e) {
-        console.error('Failed to send progress:', e.message);
-      }
-    };
 
     // Function to download with redirect handling
     const downloadFile = (downloadUrl, retries = 3) => {
@@ -62,41 +51,34 @@ function registerModelIpc(state) {
         }
 
         const request = protocol.get(downloadUrl, options, (response) => {
-          // Handle redirects
+          // Handle redirects (301, 302, 307, 308)
           if (response.statusCode >= 300 && response.statusCode < 400) {
             const redirectUrl = response.headers.location;
-            console.log(`Redirect (${response.statusCode})`);
+            console.log(
+              `Redirect (${response.statusCode}) to:`,
+              redirectUrl?.substring(0, 100) + '...',
+            );
 
             if (!redirectUrl) {
               reject(new Error('Redirect without location header'));
               return;
             }
 
+            // Follow redirect
             downloadFile(redirectUrl, retries).then(resolve).catch(reject);
             return;
           }
 
           if (response.statusCode !== 200 && response.statusCode !== 206) {
-            reject(new Error(`HTTP ${response.statusCode}`));
+            reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
             return;
           }
 
           const totalBytes = parseInt(response.headers['content-length'], 10) || 0;
           const totalSize = resumeFrom + totalBytes;
-          console.log(`Total size: ${(totalSize / 1e9).toFixed(2)} GB`);
+          console.log(`Downloading: ${(totalSize / 1e9).toFixed(2)} GB total`);
 
-          // Send initial progress
-          if (resumeFrom > 0) {
-            const initialProgress = Math.round((resumeFrom / totalSize) * 100);
-            sendProgress({
-              filename,
-              progress: initialProgress,
-              downloaded: resumeFrom,
-              total: totalSize,
-              speed: 0,
-            });
-          }
-
+          // Create write stream (append if resuming)
           const file = fs.createWriteStream(tempPath, { flags: resumeFrom > 0 ? 'a' : 'w' });
           let downloadedBytes = resumeFrom;
           let lastUpdateTime = Date.now();
@@ -105,21 +87,21 @@ function registerModelIpc(state) {
           response.on('data', (chunk) => {
             downloadedBytes += chunk.length;
 
+            // Update progress every 500ms
             const now = Date.now();
-            // Send progress every 500ms
             if (now - lastUpdateTime > 500) {
-              const timeDiff = (now - lastUpdateTime) / 1000;
-              const bytesDiff = downloadedBytes - lastUpdateBytes;
-              const speed = bytesDiff / timeDiff;
+              const speed = (downloadedBytes - lastUpdateBytes) / ((now - lastUpdateTime) / 1000);
               const progress = totalSize > 0 ? Math.round((downloadedBytes / totalSize) * 100) : 0;
 
-              sendProgress({
-                filename,
-                progress,
-                downloaded: downloadedBytes,
-                total: totalSize,
-                speed: speed,
-              });
+              if (event.sender && !event.sender.isDestroyed()) {
+                event.sender.send('model:downloadProgress', {
+                  filename,
+                  progress,
+                  downloaded: downloadedBytes,
+                  total: totalSize,
+                  speed: speed,
+                });
+              }
 
               lastUpdateTime = now;
               lastUpdateBytes = downloadedBytes;
@@ -131,23 +113,16 @@ function registerModelIpc(state) {
           file.on('finish', () => {
             file.close();
 
-            // Send 100% progress
-            sendProgress({
-              filename,
-              progress: 100,
-              downloaded: totalSize,
-              total: totalSize,
-              speed: 0,
-            });
-
+            // Rename temp file to final filename
             try {
               if (fs.existsSync(destPath)) {
                 fs.unlinkSync(destPath);
               }
               fs.renameSync(tempPath, destPath);
-              console.log('✓ Download complete');
+              console.log('✓ Download complete:', destPath);
             } catch (renameErr) {
               console.error('Rename failed:', renameErr);
+              // If rename fails, the file is still at tempPath
               reject(renameErr);
               return;
             }
@@ -166,20 +141,21 @@ function registerModelIpc(state) {
           console.error('Request error:', err.message);
 
           if (retries > 0) {
-            console.log(`Retrying... (${retries} left)`);
+            console.log(`Retrying... (${retries} retries left)`);
             setTimeout(() => {
               downloadFile(downloadUrl, retries - 1)
                 .then(resolve)
                 .catch(reject);
-            }, 3000);
+            }, 3000); // Wait 3 seconds before retry
           } else {
             reject(err);
           }
         });
 
+        // Longer timeout (5 minutes)
         request.setTimeout(300000, () => {
           request.destroy();
-          reject(new Error('Download timed out'));
+          reject(new Error('Download timed out after 5 minutes'));
         });
       });
     };

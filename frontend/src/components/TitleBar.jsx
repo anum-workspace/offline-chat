@@ -40,7 +40,7 @@ export default function TitleBar({ title = "OfflineChat" }) {
     >
       {/* App icon and title */}
       <div className="flex items-center gap-2 pl-3">
-        <img src={appIcon} alt="OfflineChat" className="w-5 h-5" />
+        <img src={appIcon} alt="OfflineChat" className="w-6 h-6" />
         <span className="text-xs text-gray-400 font-medium">{title}</span>
       </div>
 

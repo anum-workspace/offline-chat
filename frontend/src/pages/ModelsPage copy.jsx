@@ -20,12 +20,12 @@ export default function ModelsPage() {
   const [starFilter, setStarFilter] = useState(0);
   const [showFilters, setShowFilters] = useState(false);
   const [loading, setLoading] = useState(false);
-
-  // Track downloads per model name
-  const [downloads, setDownloads] = useState({}); // { modelName: { progress, downloaded, total, speed } }
-  const [downloadErrors, setDownloadErrors] = useState({}); // { modelName: errorMessage }
-
+  const [downloadProgress, setDownloadProgress] = useState(null);
+  const [downloadError, setDownloadError] = useState(null);
   const [modelsDirectory, setModelsDirectory] = useState('');
+  const [downloadingFile, setDownloadingFile] = useState(null);
+
+  // Use ref to track the cleanup function
   const cleanupRef = useRef(null);
 
   useEffect(() => {
@@ -33,138 +33,87 @@ export default function ModelsPage() {
     loadModelsDirectory();
 
     // Set up progress listener
+    console.log('Setting up download progress listener...');
     cleanupRef.current = window.api.onDownloadProgress((data) => {
-      setDownloads((prev) => ({
-        ...prev,
-        [data.filename]: {
-          progress: data.progress,
-          downloaded: data.downloaded,
-          total: data.total,
-          speed: data.speed,
-        },
-      }));
+      console.log('Progress received:', data);
+      setDownloadProgress(data);
     });
 
     return () => {
-      if (cleanupRef.current) cleanupRef.current();
+      // Cleanup listener on unmount
+      if (cleanupRef.current) {
+        console.log('Cleaning up download progress listener');
+        cleanupRef.current();
+      }
     };
+  }, []);
+
+  // Listen for download progress
+  useEffect(() => {
+    const cleanup = window.api.onDownloadProgress((data) => {
+      setDownloadProgress(data);
+    });
+    return cleanup;
   }, []);
 
   const loadModels = async () => {
     try {
-      const models = await window.api.getModels();
-      setInstalledModels(models || []);
-    } catch (e) {
-      console.error('Failed to load models:', e);
-    }
+      setInstalledModels(await window.api.getModels());
+    } catch (e) {}
   };
 
   const loadModelsDirectory = async () => {
     try {
       const dir = await window.api.getModelsDirectory();
       setModelsDirectory(dir || '');
-    } catch (e) {
-      console.error('Failed to load directory:', e);
-    }
+    } catch (e) {}
   };
 
-  const handleDownload = useCallback(
-    async (model) => {
-      if (!model) {
-        // This is a cancel request - find the downloading file and cancel it
-        const downloadingModel = Object.keys(downloads).find(
-          (key) => downloads[key].progress < 100,
-        );
-        if (downloadingModel) {
-          setDownloads((prev) => {
-            const next = { ...prev };
-            delete next[downloadingModel];
-            return next;
-          });
-        }
-        return;
-      }
+  const handleDownload = useCallback(async (model) => {
+    if (!model) {
+      // Cancel download
+      setDownloadProgress(null);
+      setDownloadError(null);
+      setDownloadingFile(null);
+      return;
+    }
 
-      // Set initial downloading state
-      setDownloadErrors((prev) => {
-        const next = { ...prev };
-        delete next[model.name];
-        return next;
+    console.log('Starting download for:', model.name);
+    setDownloadError(null);
+    setDownloadProgress({ filename: model.name, progress: 0, downloaded: 0, total: 0, speed: 0 });
+    setDownloadingFile(model.name);
+
+    try {
+      const result = await window.api.downloadModel({
+        url: model.url,
+        filename: model.name + '.gguf',
       });
 
-      setDownloads((prev) => ({
-        ...prev,
-        [model.name]: { progress: 0, downloaded: 0, total: 0, speed: 0 },
-      }));
+      console.log('Download result:', result);
 
-      try {
-        const result = await window.api.downloadModel({
-          url: model.url,
-          filename: model.name + '.gguf',
-        });
-
-        if (result?.success) {
-          // Keep 100% progress visible for 2 seconds
-          setDownloads((prev) => ({ ...prev, [model.name]: { progress: 100, completed: true } }));
-
-          // Refresh models list
+      if (result?.success) {
+        // Refresh installed models after a delay
+        setTimeout(async () => {
           await loadModels();
-
-          // Remove from downloads after delay
-          setTimeout(() => {
-            setDownloads((prev) => {
-              const next = { ...prev };
-              delete next[model.name];
-              return next;
-            });
-          }, 2000);
-        }
-      } catch (error) {
-        console.error('Download failed:', error);
-        setDownloads((prev) => {
-          const next = { ...prev };
-          delete next[model.name];
-          return next;
-        });
-        setDownloadErrors((prev) => ({
-          ...prev,
-          [model.name]: error.message || 'Download failed',
-        }));
+          setDownloadProgress(null);
+          setDownloadingFile(null);
+        }, 1500);
       }
-    },
-    [downloads],
-  );
-
-  const handleDismissComplete = (modelName) => {
-    setDownloads((prev) => {
-      const next = { ...prev };
-      delete next[modelName];
-      return next;
-    });
-  };
-
-  const handleRetryDownload = (model) => {
-    setDownloadErrors((prev) => {
-      const next = { ...prev };
-      delete next[model.name];
-      return next;
-    });
-    handleDownload(model);
-  };
+    } catch (error) {
+      console.error('Download failed:', error);
+      setDownloadError(error.message || 'Download failed');
+      setDownloadProgress(null);
+      setDownloadingFile(null);
+    }
+  }, []);
 
   const handleLoadModel = async (model) => {
     const installed = installedModels.find((m) => m.name === model.name);
     if (!installed) return;
 
     setLoading(true);
-    try {
-      const result = await window.api.loadModel(installed.path);
-      if (result?.success) {
-        checkModelStatus();
-      }
-    } catch (e) {
-      console.error('Load failed:', e);
-    }
+    const result = await window.api.loadModel(installed.path);
+    if (result?.success) checkModelStatus();
     setLoading(false);
   };
 
@@ -192,29 +141,17 @@ export default function ModelsPage() {
   const isInstalled = (name) => installedModels.some((m) => m.name === name);
   const isLoaded = (name) => modelStatus?.modelName === name;
 
-  const formatSize = (bytes) => {
-    if (!bytes) return '';
-    if (bytes > 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
-    if (bytes > 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
-    return `${bytes} B`;
-  };
-
   return (
     <div className='max-w-6xl mx-auto p-6 h-full overflow-y-auto'>
       {/* Header */}
       <div className='flex items-center justify-between mb-4'>
         <div>
           <h1 className='text-2xl font-bold text-gray-100'>Models</h1>
-          <p className='text-xs text-gray-500 mt-1'>
-            {RECOMMENDED_MODELS.length} models available • {installedModels.length} installed
-          </p>
+          <p className='text-xs text-gray-500 mt-1'>{RECOMMENDED_MODELS.length} models available</p>
         </div>
         <div className='flex items-center gap-2'>
           <button
-            onClick={() => {
-              loadModels();
-              loadModelsDirectory();
-            }}
+            onClick={loadModels}
             className='p-2 text-gray-500 hover:text-gray-300 hover:bg-gray-800 rounded transition-colors'
             title='Refresh'
           >
@@ -251,61 +188,6 @@ export default function ModelsPage() {
         </div>
       </div>
 
-      {/* Active Downloads */}
-      {Object.keys(downloads).length > 0 && (
-        <div className='bg-gray-900 rounded-lg border border-indigo-800 p-4 mb-4'>
-          <h3 className='text-sm font-semibold text-gray-300 mb-3'>
-            Downloads ({Object.keys(downloads).length})
-          </h3>
-          {Object.entries(downloads).map(([name, dl]) => (
-            <div key={name} className='mb-3 last:mb-0'>
-              <div className='flex items-center justify-between mb-1'>
-                <span className='text-xs text-gray-300 truncate'>{name}</span>
-                <div className='flex items-center gap-2'>
-                  <span className='text-xs text-gray-400'>{dl.progress}%</span>
-                  {dl.completed ? (
-                    <button
-                      onClick={() => handleDismissComplete(name)}
-                      className='text-[10px] px-2 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300'
-                    >
-                      Dismiss
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => handleDownload(null)}
-                      className='text-[10px] px-2 py-0.5 bg-red-900/20 hover:bg-red-900/30 rounded text-red-400'
-                    >
-                      Cancel
-                    </button>
-                  )}
-                </div>
-              </div>
-              <div className='w-full bg-gray-700 rounded-full h-2 overflow-hidden'>
-                <div
-                  className={`h-2 rounded-full transition-all duration-500 ${dl.completed ? 'bg-green-500' : 'bg-blue-500'}`}
-                  style={{ width: `${dl.progress}%` }}
-                />
-              </div>
-              <div className='flex justify-between text-[10px] text-gray-500 mt-1'>
-                <span>
-                  {dl.downloaded > 0 ? formatSize(dl.downloaded) : ''}
-                  {dl.total > 0 ? ` / ${formatSize(dl.total)}` : ''}
-                </span>
-                {dl.speed > 0 && !dl.completed && (
-                  <span>
-                    {dl.speed > 1e6
-                      ? `${(dl.speed / 1e6).toFixed(1)} MB/s`
-                      : dl.speed > 1e3
-                        ? `${(dl.speed / 1e3).toFixed(0)} KB/s`
-                        : `${dl.speed.toFixed(0)} B/s`}
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
       {/* Search & Filters */}
       <div className='bg-gray-900 rounded-lg border border-gray-800 p-4 mb-4'>
         <div className='flex items-center gap-3 mb-3'>
@@ -329,14 +211,14 @@ export default function ModelsPage() {
           >
             <VscFilter className='w-3.5 h-3.5' />
             Filters
-            {(typeFilter !== 'all' ||
-              familyFilter !== 'all' ||
-              sizeFilter !== 'all' ||
-              starFilter > 0) && (
+            {typeFilter !== 'all' ||
+            familyFilter !== 'all' ||
+            sizeFilter !== 'all' ||
+            starFilter > 0 ? (
               <span className='w-5 h-5 rounded-full bg-indigo-600 text-white text-[10px] flex items-center justify-center'>
                 !
               </span>
-            )}
+            ) : null}
           </button>
         </div>
 
@@ -426,6 +308,7 @@ export default function ModelsPage() {
               </div>
             </div>
 
+            {/* Clear Filters */}
             {(typeFilter !== 'all' ||
               familyFilter !== 'all' ||
               sizeFilter !== 'all' ||
@@ -474,10 +357,8 @@ export default function ModelsPage() {
                   isLoaded={isLoaded(m.name)}
                   onLoad={() => handleLoadModel(model)}
                   onDownload={() => {}}
-                  downloadProgress={downloads[model.name] || null}
-                  downloadError={downloadErrors[model.name] || null}
-                  onRetry={() => handleRetryDownload(model)}
-                  onDismiss={() => handleDismissComplete(model.name)}
+                  downloadProgress={null}
+                  downloadError={null}
                 />
               );
             })}
@@ -485,7 +366,7 @@ export default function ModelsPage() {
         </div>
       )}
 
-      {/* Available Models */}
+      {/* Model Grid */}
       <h2 className='text-sm font-semibold text-gray-300 mb-2'>
         Available Models ({filteredModels.length})
       </h2>
@@ -498,10 +379,8 @@ export default function ModelsPage() {
             isLoaded={isLoaded(model.name)}
             onLoad={handleLoadModel}
             onDownload={handleDownload}
-            downloadProgress={downloads[model.name] || null}
-            downloadError={downloadErrors[model.name] || null}
-            onRetry={() => handleRetryDownload(model)}
-            onDismiss={() => handleDismissComplete(model.name)}
+            downloadProgress={downloadProgress?.filename === model.name ? downloadProgress : null}
+            downloadError={downloadProgress?.filename === model.name ? downloadError : null}
           />
         ))}
       </div>
@@ -527,6 +406,19 @@ export default function ModelsPage() {
           </div>
         </div>
       )}
+
+      {/* Count */}
+      <div className='text-center py-6 text-[10px] text-gray-600'>
+        Showing {filteredModels.length} of {RECOMMENDED_MODELS.length} models
+        {installedModels.length > 0 && ` • ${installedModels.length} installed`}
+      </div>
     </div>
   );
+}
+
+function formatSize(bytes) {
+  if (!bytes) return '';
+  if (bytes > 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes > 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
+  return `${bytes} B`;
 }
